@@ -19,7 +19,8 @@ import kotlin.math.max
  *
  * 手势约定：
  *  - 屏幕中部向左滑 → 下一页；向右滑 → 上一页
- *  - 向上或向下滑 → 拉出章节列表（不分方向）
+ *  - 向上滑 → 下一页（走同一套翻页逻辑，竖向位移等价为水平进度）
+ *  - 向下滑 → 拉出章节列表
  *  - 点击屏幕左侧 [ChapterTapZoneFraction] 区域 → 拉出章节列表（不依赖滑动方向的兜底入口）
  *  - 屏幕右边缘起手向左滑 → 返回书柜
  *  - 边缘手势优先，一旦判定成功不再触发翻页
@@ -92,7 +93,9 @@ suspend fun PointerInputScope.detectReaderGestures(callbacks: ReaderGestureCallb
         var dx = 0f
         var dy = 0f
         var maxPointers = 1
-        var lastDragX = 0f
+        // 翻页手势的进度轴：横向用 dx，上滑翻页用 dy（两者符号约定一致，左滑/上滑都是负值）
+        var lastDrag = 0f
+        var verticalPage = false
         var lastUptime = down.uptimeMillis
 
         while (true) {
@@ -116,29 +119,42 @@ suspend fun PointerInputScope.detectReaderGestures(callbacks: ReaderGestureCallb
                     mode = if (fromBackEdge && dx < 0) ReaderGestureMode.EXIT else ReaderGestureMode.PAGE
                     change.consume()
                     if (mode == ReaderGestureMode.PAGE) {
-                        lastDragX = dx
+                        verticalPage = false
+                        lastDrag = dx
                         callbacks.onPageDragStart()
                     }
                 } else if (vertical) {
-                    // 上滑、下滑都唤出目录，一确认方向就打开，避免"滑了没反应"
-                    mode = ReaderGestureMode.CHAPTERS
-                    change.consume()
-                    callbacks.onOpenChapters()
+                    if (dy < 0) {
+                        // 上滑 = 下一页：复用横向翻页那条路，把竖向位移当作等价的水平位移驱动同一个 pager
+                        mode = ReaderGestureMode.PAGE
+                        verticalPage = true
+                        lastDrag = dy
+                        change.consume()
+                        callbacks.onPageDragStart()
+                    } else {
+                        // 下滑唤出目录
+                        mode = ReaderGestureMode.CHAPTERS
+                        change.consume()
+                        callbacks.onOpenChapters()
+                    }
                 }
             } else if (mode != ReaderGestureMode.NONE) {
                 change?.consume()
                 if (mode == ReaderGestureMode.PAGE && change != null) {
-                    callbacks.onPageDrag(dx - lastDragX)
-                    lastDragX = dx
+                    val drag = if (verticalPage) dy else dx
+                    callbacks.onPageDrag(drag - lastDrag)
+                    lastDrag = drag
                 }
             }
 
             if (event.changes.none { it.pressed }) break
         }
 
-        val velocity = tracker.calculateVelocity().x
+        val velocity = tracker.calculateVelocity()
+        val pageDx = if (verticalPage) dy else dx
+        val pageVelocity = if (verticalPage) velocity.y else velocity.x
         when (mode) {
-            ReaderGestureMode.PAGE -> callbacks.onPageDragEnd(dx, velocity)
+            ReaderGestureMode.PAGE -> callbacks.onPageDragEnd(pageDx, pageVelocity)
             ReaderGestureMode.EXIT -> if (dx <= -exitTriggerPx) callbacks.onExit()
             ReaderGestureMode.CHAPTERS -> Unit
             ReaderGestureMode.NONE -> {
