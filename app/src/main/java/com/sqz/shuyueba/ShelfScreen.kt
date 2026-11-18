@@ -79,7 +79,7 @@ private const val DeleteLongPressMillis = 1000L
 fun ShelfScreen(
     books: List<LibraryBook>,
     store: LibraryStore,
-    repository: EpubRepository,
+    repository: BookRepository,
     targetWidth: Int,
     onOpenBook: (LibraryBook) -> Unit,
     onLibraryChanged: (List<LibraryBook>) -> Unit
@@ -111,8 +111,11 @@ fun ShelfScreen(
             adding = true
             try {
                 SafUtils.persistReadPermission(context, uri)
-                // 仍然解析一次，确认选中的文件确实是可读的 EPUB
-                withContext(Dispatchers.IO) { repository.parse(uri) }
+                val format = withContext(Dispatchers.IO) {
+                    BookRepository.detectFormat(context, uri)
+                } ?: throw IllegalArgumentException("无法识别的书籍格式")
+                // 解析一次，确认选中的文件确实是可读的书籍
+                withContext(Dispatchers.IO) { repository.open(uri, format) }
                 val title = SafUtils.bookTitle(context, uri) ?: "未命名"
                 val added = store.add(
                     LibraryBook(
@@ -122,13 +125,14 @@ fun ShelfScreen(
                         chapterIndex = 0,
                         pageIndex = 0,
                         lastReadAt = 0L,
-                        addedAt = System.currentTimeMillis()
+                        addedAt = System.currentTimeMillis(),
+                        format = format
                     )
                 )
                 if (added) showToast("已添加《$title》") else showToast("这本书已在书柜中")
                 onLibraryChanged(store.load())
             } catch (_: Exception) {
-                showToast("不是有效的 EPUB 文件")
+                showToast("不是有效的 EPUB / MOBI / PDF 文件")
             } finally {
                 adding = false
             }
@@ -162,7 +166,7 @@ fun ShelfScreen(
             if (books.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = "还没有书，点击右下角 + 添加 EPUB",
+                        text = "还没有书，点击右下角 + 添加书籍",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 14.sp
                     )
@@ -270,8 +274,12 @@ fun ShelfScreen(
                     fileLauncher.launch(
                         arrayOf(
                             "application/epub+zip",
+                            "application/pdf",
+                            "application/x-mobipocket-ebook",
+                            "application/vnd.amazon.mobi8-ebook",
                             "application/octet-stream",
-                            "application/zip"
+                            "application/zip",
+                            "application/*"
                         )
                     )
                 },
@@ -301,7 +309,7 @@ fun ShelfScreen(
 @Composable
 private fun BookCell(
     book: LibraryBook,
-    repository: EpubRepository,
+    repository: BookRepository,
     targetWidth: Int,
     deleteMode: Boolean,
     isDragging: Boolean,
@@ -424,7 +432,7 @@ private fun BookCell(
 }
 
 @Composable
-private fun BookCover(book: LibraryBook, repository: EpubRepository, targetWidth: Int) {
+private fun BookCover(book: LibraryBook, repository: BookRepository, targetWidth: Int) {
     val coverKey = book.uri
     var bitmap by remember(coverKey) { mutableStateOf(CoverBitmapCache.get(coverKey)) }
     var failed by remember(coverKey) { mutableStateOf(false) }
@@ -436,7 +444,9 @@ private fun BookCover(book: LibraryBook, repository: EpubRepository, targetWidth
             return@LaunchedEffect
         }
         val loaded = withContext(Dispatchers.IO) {
-            runCatching { repository.loadCover(Uri.parse(coverKey), targetWidth) }.getOrNull()
+            runCatching {
+                repository.loadCover(Uri.parse(coverKey), book.format, targetWidth)
+            }.getOrNull()
         }
         if (loaded != null) {
             CoverBitmapCache.put(coverKey, loaded)
@@ -459,7 +469,7 @@ private fun BookCover(book: LibraryBook, repository: EpubRepository, targetWidth
         Box(Modifier.fillMaxSize().padding(10.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = "EPUB",
+                    text = book.format.label,
                     color = Color(0xFF5E5E66),
                     fontSize = 10.sp,
                     letterSpacing = 1.sp

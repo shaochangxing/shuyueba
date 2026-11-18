@@ -15,11 +15,31 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 
-data class EpubChapter(val entry: String, val title: String)
+/** 一本书的文件格式。EPUB / MOBI 走文字排版，PDF 按页渲染。 */
+enum class BookFormat(val label: String) {
+    EPUB("EPUB"),
+    MOBI("MOBI"),
+    PDF("PDF");
 
-data class EpubBookMeta(
+    companion object {
+        /** 按文件扩展名判断格式；无法识别返回 null。 */
+        fun fromFileName(name: String?): BookFormat? =
+            when (name?.substringAfterLast('.', "")?.lowercase()) {
+                "epub" -> EPUB
+                "mobi", "prc" -> MOBI
+                "pdf" -> PDF
+                else -> null
+            }
+    }
+}
+
+/** 目录项：entry 是 EPUB 的 zip 路径 / MOBI 的章节序号 / PDF 的页码；level 用于目录缩进。 */
+data class BookChapter(val entry: String, val title: String, val level: Int = 0)
+
+data class BookMeta(
+    val format: BookFormat,
     val coverEntry: String?,
-    val chapters: List<EpubChapter>
+    val chapters: List<BookChapter>
 )
 
 /** 一章解析出来的内容块，按文档顺序排列。 */
@@ -33,26 +53,28 @@ data class ChapterContent(val blocks: List<ChapterBlock>)
 /** 解析 EPUB 的 container.xml → OPF → spine / 目录 / 封面。 */
 object EpubParser {
 
-    fun parse(file: File): EpubBookMeta {
+    fun parse(file: File): BookMeta {
         ZipFile(file).use { zip ->
             val opfPath = findOpfPath(zip)
             val opf = readOpf(zip, opfPath)
             val opfDir = opfPath.substringBeforeLast('/', "")
             val titles = readNavTitles(zip, opf, opfDir)
 
-            val chapters = ArrayList<EpubChapter>()
+            val chapters = ArrayList<BookChapter>()
             for (idref in opf.spine) {
                 val item = opf.items[idref] ?: continue
                 if (!isHtml(item.mediaType, item.href)) continue
                 val path = resolve(opfDir, item.href)
                 if (!entryExists(zip, path)) continue
-                val title = titles[path]?.takeIf { it.isNotBlank() }
+                val nav = titles[path]
+                val title = nav?.title?.takeIf { it.isNotBlank() }
                     ?: "第 ${chapters.size + 1} 节"
-                chapters.add(EpubChapter(path, title))
+                chapters.add(BookChapter(path, title, nav?.level ?: 0))
             }
 
             val cover = findCover(zip, opf, opfDir)
-            return EpubBookMeta(
+            return BookMeta(
+                format = BookFormat.EPUB,
                 coverEntry = cover,
                 chapters = chapters
             )
@@ -162,9 +184,12 @@ object EpubParser {
         return Opf(items, spine, tocId, coverId, guideCover)
     }
 
-    /** 依次读取 EPUB3 navigation document 与 EPUB2 NCX，得到「文件路径 → 章节标题」。 */
-    private fun readNavTitles(zip: ZipFile, opf: Opf, opfDir: String): Map<String, String> {
-        val result = HashMap<String, String>()
+    /** 目录项标题 + 层级（0 为一级）。 */
+    private data class NavInfo(val title: String, val level: Int)
+
+    /** 依次读取 EPUB3 navigation document 与 EPUB2 NCX，得到「文件路径 → 标题 / 层级」。 */
+    private fun readNavTitles(zip: ZipFile, opf: Opf, opfDir: String): Map<String, NavInfo> {
+        val result = HashMap<String, NavInfo>()
         val navItem = opf.items.values.firstOrNull {
             it.properties.split(Regex("\\s+")).contains("nav")
         }
@@ -179,26 +204,34 @@ object EpubParser {
         return result
     }
 
-    private fun parseNavDoc(zip: ZipFile, navPath: String, result: MutableMap<String, String>) {
+    /** EPUB3 导航文档：用嵌套 <ol> 的深度得到目录层级。 */
+    private fun parseNavDoc(zip: ZipFile, navPath: String, result: MutableMap<String, NavInfo>) {
         val text = readEntryText(zip, navPath) ?: return
         val baseDir = navPath.substringBeforeLast('/', "")
         try {
             val parser = newParser(text.reader())
             var event = parser.eventType
             var href: String? = null
+            var olDepth = 0
             val label = StringBuilder()
             while (event != XmlPullParser.END_DOCUMENT) {
                 if (event == XmlPullParser.START_TAG) {
-                    if (localName(parser.name) == "a") {
-                        href = parser.getAttributeValue(null, "href")
-                        label.setLength(0)
+                    when (localName(parser.name)) {
+                        "ol", "ul" -> olDepth++
+                        "a" -> {
+                            href = parser.getAttributeValue(null, "href")
+                            label.setLength(0)
+                        }
                     }
                 } else if (event == XmlPullParser.TEXT) {
                     if (href != null) label.append(parser.text)
                 } else if (event == XmlPullParser.END_TAG) {
-                    if (localName(parser.name) == "a" && href != null) {
-                        putTitle(result, baseDir, href, label.toString())
-                        href = null
+                    when (localName(parser.name)) {
+                        "a" -> if (href != null) {
+                            putTitle(result, baseDir, href, label.toString(), olDepth - 1)
+                            href = null
+                        }
+                        "ol", "ul" -> if (olDepth > 0) olDepth--
                     }
                 }
                 event = parser.next()
@@ -208,34 +241,42 @@ object EpubParser {
         }
     }
 
-    private fun parseNcx(zip: ZipFile, ncxPath: String, result: MutableMap<String, String>) {
+    private class NavPointBuilder {
+        val label = StringBuilder()
+        var src: String? = null
+    }
+
+    /** EPUB2 NCX：navPoint 的嵌套深度就是目录层级。 */
+    private fun parseNcx(zip: ZipFile, ncxPath: String, result: MutableMap<String, NavInfo>) {
         val text = readEntryText(zip, ncxPath) ?: return
         val baseDir = ncxPath.substringBeforeLast('/', "")
         try {
             val parser = newParser(text.reader())
             var event = parser.eventType
-            var inNavPoint = false
             var inLabel = false
-            val label = StringBuilder()
+            val stack = ArrayDeque<NavPointBuilder>()
             while (event != XmlPullParser.END_DOCUMENT) {
                 if (event == XmlPullParser.START_TAG) {
                     when (localName(parser.name)) {
-                        "navPoint" -> {
-                            inNavPoint = true
-                            label.setLength(0)
-                        }
+                        "navPoint" -> stack.addLast(NavPointBuilder())
                         "navLabel" -> inLabel = true
-                        "content" -> if (inNavPoint) {
+                        "content" -> {
                             val src = parser.getAttributeValue(null, "src")
-                            if (src != null) putTitle(result, baseDir, src, label.toString())
+                            val top = stack.lastOrNull()
+                            if (src != null && top != null && top.src == null) top.src = src
                         }
                     }
                 } else if (event == XmlPullParser.TEXT) {
-                    if (inNavPoint && inLabel) label.append(parser.text)
+                    if (inLabel) stack.lastOrNull()?.label?.append(parser.text)
                 } else if (event == XmlPullParser.END_TAG) {
                     when (localName(parser.name)) {
                         "navLabel" -> inLabel = false
-                        "navPoint" -> inNavPoint = false
+                        "navPoint" -> {
+                            val point = stack.removeLastOrNull()
+                            if (point?.src != null) {
+                                putTitle(result, baseDir, point.src!!, point.label.toString(), stack.size)
+                            }
+                        }
                     }
                 }
                 event = parser.next()
@@ -246,16 +287,19 @@ object EpubParser {
     }
 
     private fun putTitle(
-        result: MutableMap<String, String>,
+        result: MutableMap<String, NavInfo>,
         baseDir: String,
         href: String,
-        rawLabel: String
+        rawLabel: String,
+        level: Int
     ) {
         if (href.isBlank()) return
         val title = rawLabel.replace(Regex("\\s+"), " ").trim()
         if (title.isBlank()) return
         val path = resolve(baseDir, href)
-        if (!result.containsKey(path)) result[path] = title
+        if (!result.containsKey(path)) {
+            result[path] = NavInfo(title, level.coerceIn(0, 3))
+        }
     }
 
     private val coverImageTag = Regex(
@@ -530,24 +574,30 @@ object EpubHtml {
     }
 }
 
-/** EPUB 本地副本、解析缓存与封面 / 插图解码。 */
-class EpubRepository(context: Context) {
+/** 书籍本地副本、解析缓存、封面 / 插图解码；按格式分派 EPUB / MOBI / PDF。 */
+class BookRepository(context: Context) {
 
     private val appContext = context.applicationContext
-    private val cacheDir = File(appContext.cacheDir, "epub").apply { mkdirs() }
-    private val parsedCache = object : LruCache<String, EpubBookMeta>(8) {}
+    private val cacheDir = File(appContext.cacheDir, "books").apply { mkdirs() }
+    private val parsedCache = object : LruCache<String, BookMeta>(16) {}
     private val copyLocks = ConcurrentHashMap<String, Any>()
+    private val mobi = MobiRepository()
+    private val pdf = PdfRepository()
 
-    fun parse(uri: Uri): EpubBookMeta {
-        val key = uri.toString()
+    fun open(uri: Uri, format: BookFormat): BookMeta {
+        val key = "${format.name}|$uri"
         parsedCache.get(key)?.let { return it }
-        val meta = EpubParser.parse(localFile(uri))
+        val meta = when (format) {
+            BookFormat.EPUB -> EpubParser.parse(localFile(uri, "epub"))
+            BookFormat.MOBI -> mobi.open(localFile(uri, "mobi"))
+            BookFormat.PDF -> pdf.open(localFile(uri, "pdf"))
+        }
         parsedCache.put(key, meta)
         return meta
     }
 
-    fun localFile(uri: Uri): File {
-        val name = hash(uri.toString()) + ".epub"
+    fun localFile(uri: Uri, extension: String = "epub"): File {
+        val name = hash(uri.toString()) + "." + extension
         val target = File(cacheDir, name)
         if (target.exists() && target.length() > 0) return target
         val lock = copyLocks.getOrPut(name) { Any() }
@@ -566,32 +616,45 @@ class EpubRepository(context: Context) {
         return target
     }
 
-    fun loadChapter(uri: Uri, entry: String): ChapterContent {
-        ZipFile(localFile(uri)).use { zip -> return EpubParser.readChapter(zip, entry) }
-    }
-
-    fun loadCover(uri: Uri, targetWidth: Int): Bitmap? {
-        val meta = parse(uri)
-        val entryName = meta.coverEntry ?: return null
-        return try {
-            ZipFile(localFile(uri)).use { zip ->
-                val entry = zip.getEntry(entryName) ?: return null
-                EpubParser.decodeSampled(zip, entry, targetWidth)
+    fun loadChapter(uri: Uri, format: BookFormat, entry: String): ChapterContent =
+        when (format) {
+            BookFormat.EPUB -> ZipFile(localFile(uri, "epub")).use { zip ->
+                EpubParser.readChapter(zip, entry)
             }
-        } catch (_: Exception) {
-            null
+            BookFormat.MOBI -> mobi.loadChapter(localFile(uri, "mobi"), entry)
+            BookFormat.PDF -> ChapterContent(listOf(ChapterBlock.Image(entry)))
         }
+
+    fun loadCover(uri: Uri, format: BookFormat, targetWidth: Int): Bitmap? = try {
+        when (format) {
+            BookFormat.EPUB -> {
+                val entryName = open(uri, format).coverEntry
+                if (entryName == null) null else ZipFile(localFile(uri, "epub")).use { zip ->
+                    val entry = zip.getEntry(entryName) ?: return@use null
+                    EpubParser.decodeSampled(zip, entry, targetWidth)
+                }
+            }
+            BookFormat.MOBI -> mobi.loadCover(localFile(uri, "mobi"), targetWidth)
+            BookFormat.PDF -> pdf.loadCover(localFile(uri, "pdf"), targetWidth)
+        }
+    } catch (_: Exception) {
+        null
     }
 
     fun cachedImage(uri: Uri, entry: String): Bitmap? = ImageBitmapCache.get(cacheKey(uri, entry))
 
-    fun loadImage(uri: Uri, entry: String, targetWidth: Int): Bitmap? {
+    fun loadImage(uri: Uri, format: BookFormat, entry: String, targetWidth: Int): Bitmap? {
         val key = cacheKey(uri, entry)
         ImageBitmapCache.get(key)?.let { return it }
         return try {
-            ZipFile(localFile(uri)).use { zip ->
-                EpubParser.loadImage(zip, entry, targetWidth)?.also { ImageBitmapCache.put(key, it) }
+            val bitmap = when (format) {
+                BookFormat.EPUB -> ZipFile(localFile(uri, "epub")).use { zip ->
+                    EpubParser.loadImage(zip, entry, targetWidth)
+                }
+                BookFormat.MOBI -> mobi.loadImage(localFile(uri, "mobi"), entry, targetWidth)
+                BookFormat.PDF -> pdf.loadImage(localFile(uri, "pdf"), entry, targetWidth)
             }
+            bitmap?.also { ImageBitmapCache.put(key, it) }
         } catch (_: Exception) {
             null
         }
@@ -599,6 +662,28 @@ class EpubRepository(context: Context) {
 
     companion object {
         fun cacheKey(uri: Uri, entry: String): String = "$uri#$entry"
+
+        /** 先看扩展名，再嗅探文件头，兼容文档提供方给不出正确 MimeType 的情况。 */
+        fun detectFormat(context: Context, uri: Uri): BookFormat? {
+            BookFormat.fromFileName(SafUtils.displayName(context, uri))?.let { return it }
+            return try {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    val head = ByteArray(64)
+                    val read = input.read(head)
+                    if (read < 8) return null
+                    when {
+                        head[0] == 0x25.toByte() && head[1] == 0x50.toByte() &&
+                            head[2] == 0x44.toByte() && head[3] == 0x46.toByte() -> BookFormat.PDF
+                        head[0] == 0x50.toByte() && head[1] == 0x4B.toByte() -> BookFormat.EPUB
+                        read >= 68 && String(head, 60, 8, Charsets.ISO_8859_1) == "BOOKMOBI" ->
+                            BookFormat.MOBI
+                        else -> null
+                    }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
 
         private fun hash(value: String): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())

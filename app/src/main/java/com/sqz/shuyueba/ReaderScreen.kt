@@ -77,7 +77,7 @@ private data class PageRef(val chapter: Int, val page: Int)
 @Composable
 fun ReaderScreen(
     book: LibraryBook,
-    repository: EpubRepository,
+    repository: BookRepository,
     store: LibraryStore,
     onBack: () -> Unit
 ) {
@@ -100,6 +100,7 @@ fun ReaderScreen(
         val session = remember(book.id, metrics) {
             ReaderSession(
                 uri = Uri.parse(book.uri),
+                format = book.format,
                 repository = repository,
                 paginator = paginator,
                 paginateDispatcher = paginateDispatcher,
@@ -148,7 +149,7 @@ private fun ReaderMessage(text: String, onBack: () -> Unit) {
 @Composable
 private fun ReaderPager(
     session: ReaderSession,
-    meta: EpubBookMeta,
+    meta: BookMeta,
     metrics: ReaderMetrics,
     startChapter: Int,
     startPage: Int,
@@ -401,7 +402,7 @@ private fun ReaderPager(
 @Composable
 private fun ReaderPageView(
     session: ReaderSession,
-    meta: EpubBookMeta,
+    meta: BookMeta,
     metrics: ReaderMetrics,
     ref: PageRef,
     modifier: Modifier
@@ -462,7 +463,11 @@ private fun ReaderPageView(
                     modifier = Modifier.weight(1f)
                 )
                 Text(
-                    text = "${ref.page + 1} / ${layout.pages.size}",
+                    text = if (meta.format == BookFormat.PDF) {
+                        "${ref.chapter + 1} / ${meta.chapters.size}"
+                    } else {
+                        "${ref.page + 1} / ${layout.pages.size}"
+                    },
                     color = FooterColor,
                     fontSize = 11.sp
                 )
@@ -509,7 +514,7 @@ private fun ChapterImageView(
 
 @Composable
 private fun ChapterPanel(
-    chapters: List<EpubChapter>,
+    chapters: List<BookChapter>,
     currentChapter: Int,
     onSelect: (Int) -> Unit
 ) {
@@ -556,11 +561,17 @@ private fun ChapterPanel(
                     )
                     Text(
                         text = item.title,
-                        color = if (selected) AccentColor else Color(0xFFB7B7BE),
-                        fontSize = 14.sp,
+                        color = if (selected) AccentColor else when (item.level.coerceIn(0, 3)) {
+                            0 -> Color(0xFFB7B7BE)
+                            1 -> Color(0xFFA4A4AC)
+                            else -> Color(0xFF8C8C94)
+                        },
+                        fontSize = if (item.level == 0) 14.sp else 13.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 12.dp)
+                        modifier = Modifier.padding(
+                            start = 12.dp + (item.level.coerceIn(0, 3) * 16).dp
+                        )
                     )
                 }
             }
@@ -589,7 +600,7 @@ private fun BoxScope.GestureExclusionZones() {
 private fun chapterWithContent(
     from: Int,
     direction: Int,
-    meta: EpubBookMeta,
+    meta: BookMeta,
     session: ReaderSession
 ): Int? {
     var index = from

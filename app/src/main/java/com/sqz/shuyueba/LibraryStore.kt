@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 一本书就是一个 EPUB 文件；chapterIndex + pageIndex 记录精确阅读位置。 */
+/** 一本书就是一个文件（EPUB / MOBI / PDF）；chapterIndex + pageIndex 记录精确阅读位置。 */
 data class LibraryBook(
     val id: String,
     val title: String,
@@ -12,7 +12,8 @@ data class LibraryBook(
     val chapterIndex: Int,
     val pageIndex: Int,
     val lastReadAt: Long,
-    val addedAt: Long
+    val addedAt: Long,
+    val format: BookFormat = BookFormat.EPUB
 )
 
 class LibraryStore(context: Context) {
@@ -36,7 +37,10 @@ class LibraryStore(context: Context) {
                         chapterIndex = o.optInt("chapterIndex", 0),
                         pageIndex = o.optInt("pageIndex", 0),
                         lastReadAt = o.optLong("lastReadAt", 0L),
-                        addedAt = o.optLong("addedAt", 0L)
+                        addedAt = o.optLong("addedAt", 0L),
+                        format = runCatching {
+                            BookFormat.valueOf(o.optString("format", "EPUB"))
+                        }.getOrDefault(BookFormat.EPUB)
                     )
                 )
             }
@@ -58,6 +62,7 @@ class LibraryStore(context: Context) {
                     put("pageIndex", b.pageIndex)
                     put("lastReadAt", b.lastReadAt)
                     put("addedAt", b.addedAt)
+                    put("format", b.format.name)
                 }
             )
         }

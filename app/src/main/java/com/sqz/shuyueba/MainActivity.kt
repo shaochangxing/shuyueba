@@ -24,7 +24,7 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
 
     private lateinit var store: LibraryStore
-    private lateinit var repository: EpubRepository
+    private lateinit var repository: BookRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
         }
 
         store = LibraryStore(this)
-        repository = EpubRepository(this)
+        repository = BookRepository(this)
         val screenWidth = resources.displayMetrics.widthPixels
 
         setContent {

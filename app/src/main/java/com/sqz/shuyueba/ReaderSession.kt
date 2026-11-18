@@ -14,19 +14,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 单个 EPUB 的阅读会话：解析目录、按需抽取章节文字并在后台分页。
+ * 单本书的阅读会话：解析目录、按需抽取章节内容并在后台排版。
  * 布局结果放在 mutableStateMap 里，主线程只读取，不做解析与测量。
  */
 class ReaderSession(
     private val uri: Uri,
-    private val repository: EpubRepository,
+    private val format: BookFormat,
+    private val repository: BookRepository,
     private val paginator: ChapterPaginator,
     private val paginateDispatcher: CoroutineDispatcher,
     private val imageTargetWidth: Int,
     private val scope: CoroutineScope
 ) {
 
-    var meta by mutableStateOf<EpubBookMeta?>(null)
+    var meta by mutableStateOf<BookMeta?>(null)
         private set
 
     var loading by mutableStateOf(true)
@@ -43,7 +44,7 @@ class ReaderSession(
     suspend fun open() {
         loading = true
         try {
-            val parsed = withContext(Dispatchers.IO) { repository.parse(uri) }
+            val parsed = withContext(Dispatchers.IO) { repository.open(uri, format) }
             if (closed) return
             if (parsed.chapters.isEmpty()) {
                 errorMessage = "这本书没有可阅读的章节"
@@ -65,7 +66,9 @@ class ReaderSession(
         val entry = book.chapters[chapter].entry
         jobs[chapter] = scope.launch {
             val layout = try {
-                val content = withContext(Dispatchers.IO) { repository.loadChapter(uri, entry) }
+                val content = withContext(Dispatchers.IO) {
+                    repository.loadChapter(uri, format, entry)
+                }
                 withContext(paginateDispatcher) { paginator.paginate(content) }
             } catch (_: Exception) {
                 ChapterLayout("", emptyList())
@@ -78,7 +81,7 @@ class ReaderSession(
     fun cachedImage(entry: String): Bitmap? = repository.cachedImage(uri, entry)
 
     suspend fun loadImage(entry: String): Bitmap? =
-        withContext(Dispatchers.IO) { repository.loadImage(uri, entry, imageTargetWidth) }
+        withContext(Dispatchers.IO) { repository.loadImage(uri, format, entry, imageTargetWidth) }
 
     fun close() {
         closed = true
