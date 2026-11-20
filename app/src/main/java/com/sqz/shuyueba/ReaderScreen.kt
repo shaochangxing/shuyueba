@@ -12,13 +12,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,7 +30,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -302,8 +299,7 @@ private fun ReaderPager(
             animJob?.cancel()
             offset = 0f
             panelOpen = true
-        },
-        onExit = { onExit(chapter, page) }
+        }
     )
 
     val gestureModifier = rememberReaderGestureModifier(
@@ -358,9 +354,6 @@ private fun ReaderPager(
         BackHandler {
             if (panelOpen) panelOpen = false else onExit(chapter, page)
         }
-
-        // 把左右边缘条带从系统返回手势区里排除，边缘手势才收得到事件
-        GestureExclusionZones()
 
         AnimatedVisibility(
             visible = panelOpen,
@@ -577,23 +570,6 @@ private fun ChapterPanel(
             }
         }
     }
-}
-
-/**
- * 右边缘的手势排除条带：告诉系统这部分区域不要用来做返回手势。
- * 系统对每条边缘的排除高度上限约 200dp，因此只覆盖顶部一段，不排除整屏，
- * 屏幕中部起手的系统返回手势仍然可用。
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun BoxScope.GestureExclusionZones() {
-    Box(
-        Modifier
-            .align(Alignment.TopEnd)
-            .width(ReaderGestureConfig.BackEdgeWidth)
-            .height(ReaderGestureConfig.GestureExclusionHeight)
-            .systemGestureExclusion()
-    )
 }
 
 /** direction = 1 向后找，-1 向前找；返回尚未排版或确认有内容的章节序号。 */
