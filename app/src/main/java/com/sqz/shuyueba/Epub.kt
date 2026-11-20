@@ -579,8 +579,10 @@ class BookRepository(context: Context) {
 
     private val appContext = context.applicationContext
     private val cacheDir = File(appContext.cacheDir, "books").apply { mkdirs() }
+    private val coverDir = File(appContext.cacheDir, "covers").apply { mkdirs() }
     private val parsedCache = object : LruCache<String, BookMeta>(16) {}
     private val copyLocks = ConcurrentHashMap<String, Any>()
+    private val coverLocks = ConcurrentHashMap<String, Any>()
     private val mobi = MobiRepository()
     private val pdf = PdfRepository()
 
@@ -625,21 +627,68 @@ class BookRepository(context: Context) {
             BookFormat.PDF -> ChapterContent(listOf(ChapterBlock.Image(entry)))
         }
 
-    fun loadCover(uri: Uri, format: BookFormat, targetWidth: Int): Bitmap? = try {
-        when (format) {
-            BookFormat.EPUB -> {
-                val entryName = open(uri, format).coverEntry
-                if (entryName == null) null else ZipFile(localFile(uri, "epub")).use { zip ->
-                    val entry = zip.getEntry(entryName) ?: return@use null
-                    EpubParser.decodeSampled(zip, entry, targetWidth)
+    fun cachedCover(uri: Uri, format: BookFormat, targetWidth: Int): Bitmap? =
+        CoverBitmapCache.get(coverKey(uri, format, targetWidth))
+
+    fun loadCover(uri: Uri, format: BookFormat, targetWidth: Int): Bitmap? {
+        val key = coverKey(uri, format, targetWidth)
+        CoverBitmapCache.get(key)?.let { return it }
+        val lock = coverLocks.getOrPut(key) { Any() }
+        return synchronized(lock) {
+            // 预载和可见项可能同时请求同一封面，拿到锁后再查一次，避免重复解析
+            CoverBitmapCache.get(key)?.let { return@synchronized it }
+
+            val diskName = hash(key)
+            val diskFile = File(coverDir, "$diskName.webp")
+            if (diskFile.exists()) {
+                runCatching { BitmapFactory.decodeFile(diskFile.absolutePath) }.getOrNull()?.let {
+                    CoverBitmapCache.put(key, it)
+                    return@synchronized it
+                }
+                diskFile.delete()
+            }
+
+            val bitmap = try {
+                when (format) {
+                    BookFormat.EPUB -> {
+                        val entryName = open(uri, format).coverEntry
+                        if (entryName == null) null else ZipFile(localFile(uri, "epub")).use { zip ->
+                            val entry = zip.getEntry(entryName) ?: return@use null
+                            EpubParser.decodeSampled(zip, entry, targetWidth)
+                        }
+                    }
+                    BookFormat.MOBI -> mobi.loadCover(localFile(uri, "mobi"), targetWidth)
+                    BookFormat.PDF -> pdf.loadCover(localFile(uri, "pdf"), targetWidth)
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+            if (bitmap != null) {
+                CoverBitmapCache.put(key, bitmap)
+                // 磁盘缓存只用于加速下次启动，写入失败不影响本次封面显示
+                runCatching {
+                    val tmp = File(coverDir, "$diskName.tmp")
+                    val compressed = tmp.outputStream().use { output ->
+                        bitmap.compress(Bitmap.CompressFormat.WEBP, 88, output)
+                    }
+                    if (compressed) {
+                        if (diskFile.exists()) diskFile.delete()
+                        if (!tmp.renameTo(diskFile)) {
+                            tmp.copyTo(diskFile, overwrite = true)
+                            tmp.delete()
+                        }
+                    } else {
+                        tmp.delete()
+                    }
                 }
             }
-            BookFormat.MOBI -> mobi.loadCover(localFile(uri, "mobi"), targetWidth)
-            BookFormat.PDF -> pdf.loadCover(localFile(uri, "pdf"), targetWidth)
+            bitmap
         }
-    } catch (_: Exception) {
-        null
     }
+
+    private fun coverKey(uri: Uri, format: BookFormat, targetWidth: Int): String =
+        "${format.name}|$uri|$targetWidth"
 
     fun cachedImage(uri: Uri, entry: String): Bitmap? = ImageBitmapCache.get(cacheKey(uri, entry))
 

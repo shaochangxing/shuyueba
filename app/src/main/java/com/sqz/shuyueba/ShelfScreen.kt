@@ -143,6 +143,16 @@ fun ShelfScreen(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let(addBook) }
 
+    val coverWidth = (targetWidth / 3).coerceAtLeast(180)
+    LaunchedEffect(books, coverWidth) {
+        // 预载首屏和随后几行；其余封面仍在滚动到可见位置时按需加载
+        withContext(Dispatchers.IO) {
+            books.take(18).forEach { book ->
+                repository.loadCover(Uri.parse(book.uri), book.format, coverWidth)
+            }
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -434,22 +444,17 @@ private fun BookCell(
 @Composable
 private fun BookCover(book: LibraryBook, repository: BookRepository, targetWidth: Int) {
     val coverKey = book.uri
-    var bitmap by remember(coverKey) { mutableStateOf(CoverBitmapCache.get(coverKey)) }
-    var failed by remember(coverKey) { mutableStateOf(false) }
+    var bitmap by remember(coverKey, targetWidth) {
+        mutableStateOf(repository.cachedCover(Uri.parse(coverKey), book.format, targetWidth))
+    }
+    var failed by remember(coverKey, targetWidth) { mutableStateOf(false) }
 
-    LaunchedEffect(coverKey) {
-        val cached = CoverBitmapCache.get(coverKey)
-        if (cached != null) {
-            bitmap = cached
-            return@LaunchedEffect
-        }
+    LaunchedEffect(coverKey, targetWidth) {
+        if (bitmap != null) return@LaunchedEffect
         val loaded = withContext(Dispatchers.IO) {
-            runCatching {
-                repository.loadCover(Uri.parse(coverKey), book.format, targetWidth)
-            }.getOrNull()
+            repository.loadCover(Uri.parse(coverKey), book.format, targetWidth)
         }
         if (loaded != null) {
-            CoverBitmapCache.put(coverKey, loaded)
             bitmap = loaded
         } else {
             failed = true
